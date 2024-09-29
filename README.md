@@ -1,4 +1,6 @@
-# Slint Bare Metal Microcontroller Rust Template
+# Slint porting for Pico_DM_QD3503728
+
+![demo](assets/pico_dm_qd3503728_slint.jpeg)
 
 A template for a Rust Microcontroller(MCU) application that's using [Slint](https://slint-ui.com) for the user interface.
 

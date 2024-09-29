@@ -11,7 +11,7 @@ fn create_slint_app() -> AppWindow {
     let ui_handle = ui.as_weak();
     ui.on_request_increase_value(move || {
         let ui = ui_handle.unwrap();
-        ui.set_counter(ui.get_counter() + 1);
+        ui.set_slider_value(ui.get_slider_value() + 1.0);
     });
     ui
 }
@@ -25,27 +25,42 @@ fn main() -> Result<(), slint::PlatformError> {
 #[rp_pico::entry]
 fn main() -> ! {
     // Pull in any important traits
-    use fugit::RateExtU32;
+    use defmt::*;
+    use defmt_rtt as _;
     use panic_halt as _;
-    use rp_pico::hal;
-    use rp_pico::hal::pac;
-    use rp_pico::hal::prelude::*;
-    use slint::platform::WindowEvent;
+    use rp_pico as bsp;
+    use bsp::hal::{
+        clocks::{init_clocks_and_plls, Clock},
+        gpio, pac,
+        sio::Sio,
+        watchdog::Watchdog,
+        Timer,
+    };
+    // use slint::platform::WindowEvent;
+    // use embedded_graphics::pixelcolor::Rgb565;
+    use display_interface_parallel_gpio::{Generic16BitBus, PGPIO16BitInterface};
+    use mipidsi::{models::ILI9486Rgb565, options::Orientation, options::Rotation};
+    use mipidsi::options::ColorOrder;
+    use mipidsi::Builder;
 
     // -------- Setup Allocator --------
     const HEAP_SIZE: usize = 200 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
-    static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();
+    static ALLOCATOR: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
     unsafe { ALLOCATOR.init(core::ptr::addr_of_mut!(HEAP) as usize, HEAP_SIZE) }
 
     // -------- Setup peripherials --------
+    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
+    let mut watchdog = Watchdog::new(pac.WATCHDOG);
+    let sio = Sio::new(pac.SIO);
 
-    let clocks = hal::clocks::init_clocks_and_plls(
-        rp_pico::XOSC_CRYSTAL_FREQ,
+    // External high-speed crystal on the pico board is 12Mhz
+    let external_xtal_freq_hz = 12_000_000u32;
+    let clocks = init_clocks_and_plls(
+        external_xtal_freq_hz,
         pac.XOSC,
         pac.CLOCKS,
         pac.PLL_SYS,
@@ -56,45 +71,76 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().raw());
+    let mut delay = DelayCompat(cortex_m::delay::Delay::new(
+        core.SYST,
+        clocks.system_clock.freq().to_Hz(),
+    ));
 
-    let sio = hal::sio::Sio::new(pac.SIO);
-    let pins = rp_pico::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut pac.RESETS);
-
-    let timer = hal::Timer::new(pac.TIMER, &mut pac.RESETS);
-
-    let _spi_sclk = pins.gpio10.into_mode::<hal::gpio::FunctionSpi>();
-    let _spi_mosi = pins.gpio11.into_mode::<hal::gpio::FunctionSpi>();
-    let _spi_miso = pins.gpio12.into_mode::<hal::gpio::FunctionSpi>();
-
-    let spi = hal::spi::Spi::<_, _, 8>::new(pac.SPI1);
-    let spi = spi.init(
+    let pins = bsp::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
         &mut pac.RESETS,
-        clocks.peripheral_clock.freq(),
-        62_500_000.Hz(),
-        &embedded_hal::spi::MODE_3,
     );
-    let spi = shared_bus::BusManagerSimple::new(spi);
 
-    let bl = pins.gpio13.into_push_pull_output();
-    let rst = pins.gpio15.into_push_pull_output();
-    let dc = pins.gpio8.into_push_pull_output();
-    let cs = pins.gpio9.into_push_pull_output();
-    let di = display_interface_spi::SPIInterface::new(spi.acquire_spi(), dc, cs);
-    let mut display = st7789::ST7789::new(di, Some(rst), Some(bl), 320, 240);
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
-    display.init(&mut delay).unwrap();
-    display.set_orientation(st7789::Orientation::Landscape).unwrap();
+    let rst = pins.gpio22.into_push_pull_output_in_state(gpio::PinState::High);
+    let wr = pins.gpio19.into_push_pull_output_in_state(gpio::PinState::High);
+    let dc = pins.gpio20.into_push_pull_output();
+    let _blk = pins.gpio28.into_push_pull_output_in_state(gpio::PinState::High);
 
-    // touch screen
-    let touch_irq = pins.gpio17.into_pull_up_input();
-    let mut touch =
-        xpt2046::XPT2046::new(touch_irq, pins.gpio16.into_push_pull_output(), spi.acquire_spi())
-            .unwrap();
+    let lcd_d0 = pins.gpio0.into_push_pull_output();
+    let lcd_d1 = pins.gpio1.into_push_pull_output();
+    let lcd_d2 = pins.gpio2.into_push_pull_output();
+    let lcd_d3 = pins.gpio3.into_push_pull_output();
+    let lcd_d4 = pins.gpio4.into_push_pull_output();
+    let lcd_d5 = pins.gpio5.into_push_pull_output();
+    let lcd_d6 = pins.gpio6.into_push_pull_output();
+    let lcd_d7 = pins.gpio7.into_push_pull_output();
+    let lcd_d8 = pins.gpio8.into_push_pull_output();
+    let lcd_d9 = pins.gpio9.into_push_pull_output();
+    let lcd_d10 = pins.gpio10.into_push_pull_output();
+    let lcd_d11 = pins.gpio11.into_push_pull_output();
+    let lcd_d12 = pins.gpio12.into_push_pull_output();
+    let lcd_d13 = pins.gpio13.into_push_pull_output();
+    let lcd_d14 = pins.gpio14.into_push_pull_output();
+    let lcd_d15 = pins.gpio15.into_push_pull_output();
+
+    let bus = Generic16BitBus::new((
+        lcd_d0,
+        lcd_d1,
+        lcd_d2,
+        lcd_d3,
+        lcd_d4,
+        lcd_d5,
+        lcd_d6,
+        lcd_d7,
+        lcd_d8,
+        lcd_d9,
+        lcd_d10,
+        lcd_d11,
+        lcd_d12,
+        lcd_d13,
+        lcd_d14,
+        lcd_d15,
+    ));
+
+    let di = PGPIO16BitInterface::new(bus, dc, wr);
+    let rotation = Orientation::new().rotate(Rotation::Deg270).flip_horizontal();
+    let mut display = Builder::new(ILI9486Rgb565, di)
+        .reset_pin(rst)
+        .color_order(ColorOrder::Bgr)
+        .orientation(rotation)
+        .init(&mut delay)
+        .unwrap();
+
+    const HOR_RES: u32 = 480;
+    const VER_RES: u32 = 320;
 
     // -------- Setup the Slint backend --------
     let window = slint::platform::software_renderer::MinimalSoftwareWindow::new(Default::default());
-    window.set_size(slint::PhysicalSize::new(320, 240));
+    window.set_size(slint::PhysicalSize::new(HOR_RES, VER_RES));
     slint::platform::set_platform(alloc::boxed::Box::new(MyPlatform {
         window: window.clone(),
         timer,
@@ -103,7 +149,7 @@ fn main() -> ! {
 
     struct MyPlatform {
         window: alloc::rc::Rc<slint::platform::software_renderer::MinimalSoftwareWindow>,
-        timer: hal::Timer,
+        timer: Timer,
     }
 
     impl slint::platform::Platform for MyPlatform {
@@ -111,7 +157,7 @@ fn main() -> ! {
             Ok(self.window.clone())
         }
         fn duration_since_start(&self) -> core::time::Duration {
-            core::time::Duration::from_micros(self.timer.get_counter())
+            core::time::Duration::from_micros(self.timer.get_counter().ticks())
         }
     }
 
@@ -120,8 +166,8 @@ fn main() -> ! {
     let _ui = create_slint_app();
 
     // -------- Event loop --------
-    let mut line = [slint::platform::software_renderer::Rgb565Pixel(0); 320];
-    let mut last_touch = None;
+    let mut line = [slint::platform::software_renderer::Rgb565Pixel(0); HOR_RES as usize];
+    // let mut last_touch = None;
     loop {
         slint::platform::update_timers_and_animations();
         window.draw_if_needed(|renderer| {
@@ -163,28 +209,28 @@ fn main() -> ! {
         });
 
         // handle touch event
-        let button = slint::platform::PointerEventButton::Left;
-        if let Some(event) = touch
-            .read()
-            .map_err(|_| ())
-            .unwrap()
-            .map(|point| {
-                let position =
-                    slint::PhysicalPosition::new((point.0 * 320.) as _, (point.1 * 240.) as _)
-                        .to_logical(window.scale_factor());
-                match last_touch.replace(position) {
-                    Some(_) => WindowEvent::PointerMoved { position },
-                    None => WindowEvent::PointerPressed { position, button },
-                }
-            })
-            .or_else(|| {
-                last_touch.take().map(|position| WindowEvent::PointerReleased { position, button })
-            })
-        {
-            window.dispatch_event(event);
-            // Don't go to sleep after a touch event that forces a redraw
-            continue;
-        }
+        let _button = slint::platform::PointerEventButton::Left;
+        // if let Some(event) = touch
+        //     .read()
+        //     .map_err(|_| ())
+        //     .unwrap()
+        //     .map(|point| {
+        //         let position =
+        //             slint::PhysicalPosition::new((point.0 * 480.) as _, (point.1 * 320.) as _)
+        //                 .to_logical(window.scale_factor());
+        //         match last_touch.replace(position) {
+        //             Some(_) => WindowEvent::PointerMoved { position },
+        //             None => WindowEvent::PointerPressed { position, button },
+        //         }
+        //     })
+        //     .or_else(|| {
+        //         last_touch.take().map(|position| WindowEvent::PointerReleased { position, button })
+        //     })
+        // {
+        //     window.dispatch_event(event);
+        //     // Don't go to sleep after a touch event that forces a redraw
+        //     continue;
+        // }
 
         if window.has_active_animations() {
             continue;
@@ -196,120 +242,31 @@ fn main() -> ! {
         // cortex_m::asm::wfe();
     }
 }
+/// Wrapper around `Delay` to implement the embedded-hal 1.0 delay.
+///
+/// This can be removed when a new version of the `cortex_m` crate is released.
+#[cfg(not(feature = "simulator"))]
+struct DelayCompat(cortex_m::delay::Delay);
 
 #[cfg(not(feature = "simulator"))]
-mod xpt2046 {
-    use embedded_hal::blocking::spi::Transfer;
-    use embedded_hal::digital::v2::{InputPin, OutputPin};
-    use fugit::RateExtU32;
-
-    pub struct XPT2046<IRQ: InputPin + 'static, CS: OutputPin, SPI: Transfer<u8>> {
-        irq: IRQ,
-        cs: CS,
-        spi: SPI,
-        pressed: bool,
-    }
-
-    impl<PinE, IRQ: InputPin<Error = PinE>, CS: OutputPin<Error = PinE>, SPI: Transfer<u8>>
-        XPT2046<IRQ, CS, SPI>
-    {
-        pub fn new(irq: IRQ, mut cs: CS, spi: SPI) -> Result<Self, PinE> {
-            cs.set_high()?;
-            Ok(Self { irq, cs, spi, pressed: false })
-        }
-
-        pub fn read(&mut self) -> Result<Option<(f32, f32)>, Error<PinE, SPI::Error>> {
-            const PRESS_THRESHOLD: i32 = -25_000;
-            const RELEASE_THRESHOLD: i32 = -30_000;
-            let threshold = if self.pressed { RELEASE_THRESHOLD } else { PRESS_THRESHOLD };
-            self.pressed = false;
-
-            if self.irq.is_low().map_err(|e| Error::Pin(e))? {
-                const CMD_X_READ: u8 = 0b10010000;
-                const CMD_Y_READ: u8 = 0b11010000;
-                const CMD_Z1_READ: u8 = 0b10110000;
-                const CMD_Z2_READ: u8 = 0b11000000;
-
-                // These numbers were measured approximately.
-                const MIN_X: u32 = 1900;
-                const MAX_X: u32 = 30300;
-                const MIN_Y: u32 = 2300;
-                const MAX_Y: u32 = 30300;
-
-                // FIXME! how else set the frequency to this device
-                unsafe { set_spi_freq(3_000_000u32.Hz()) };
-
-                self.cs.set_low().map_err(|e| Error::Pin(e))?;
-
-                macro_rules! xchg {
-                    ($byte:expr) => {
-                        match self
-                            .spi
-                            .transfer(&mut [$byte, 0, 0])
-                            .map_err(|e| Error::Transfer(e))?
-                        {
-                            [_, h, l] => ((*h as u32) << 8) | (*l as u32),
-                            _ => return Err(Error::InternalError),
-                        }
-                    };
-                }
-
-                let z1 = xchg!(CMD_Z1_READ);
-                let z2 = xchg!(CMD_Z2_READ);
-                let z = z1 as i32 - z2 as i32;
-
-                if z < threshold {
-                    xchg!(0);
-                    self.cs.set_high().map_err(|e| Error::Pin(e))?;
-                    unsafe { set_spi_freq(62_500_000.Hz()) };
-                    return Ok(None);
-                }
-
-                xchg!(CMD_X_READ | 1); // Dummy read, first read is a outlier
-
-                let mut point = (0u32, 0u32);
-                for _ in 0..10 {
-                    let y = xchg!(CMD_Y_READ);
-                    let x = xchg!(CMD_X_READ);
-                    point.0 += i16::MAX as u32 - x;
-                    point.1 += y;
-                }
-
-                let z1 = xchg!(CMD_Z1_READ);
-                let z2 = xchg!(CMD_Z2_READ);
-                let z = z1 as i32 - z2 as i32;
-
-                xchg!(0);
-                self.cs.set_high().map_err(|e| Error::Pin(e))?;
-                unsafe { set_spi_freq(62_500_000.Hz()) };
-
-                if z < RELEASE_THRESHOLD {
-                    return Ok(None);
-                }
-
-                point.0 /= 10;
-                point.1 /= 10;
-                self.pressed = true;
-                Ok(Some((
-                    point.0.saturating_sub(MIN_X) as f32 / (MAX_X - MIN_X) as f32,
-                    point.1.saturating_sub(MIN_Y) as f32 / (MAX_Y - MIN_Y) as f32,
-                )))
-            } else {
-                Ok(None)
-            }
+impl embedded_hal::delay::DelayNs for DelayCompat {
+    fn delay_ns(&mut self, mut ns: u32) {
+        while ns > 1000 {
+            self.0.delay_us(1);
+            ns = ns.saturating_sub(1000);
         }
     }
 
-    pub enum Error<PinE, TransferE> {
-        Pin(PinE),
-        Transfer(TransferE),
-        InternalError,
+    fn delay_us(&mut self, us: u32) {
+        self.0.delay_us(us);
     }
 
-    unsafe fn set_spi_freq(freq: impl Into<fugit::Hertz<u32>>) {
-        use rp_pico::hal;
-        // FIXME: the touchscreen and the LCD have different frequencies, but we cannot really set different frequencies to different SpiProxy without this hack
-        hal::spi::Spi::<_, _, 8>::new(hal::pac::Peripherals::steal().SPI1)
-            .set_baudrate(125_000_000u32.Hz(), freq);
+    fn delay_ms(&mut self, ms: u32) {
+        self.delay_us(ms * 1000);
     }
+}
+// TODO: implement ft6236 touch driver support
+#[cfg(not(feature = "simulator"))]
+mod ft6236 {
+
 }

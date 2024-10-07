@@ -6,20 +6,27 @@ build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+name = "lib"
 
 [dependencies]
 slint = { version = "1.7", default-features = false, features = ["compat-1-2", "renderer-software"] }
 
 # for the rp-pico, replace by the hal for your crate
 rp-pico = { version = "0.9.0", optional = true }
+rp2040-hal = { version = "0.10.2", optional = true }
+pio-proc = { version = "0.2.2", optional = true }
+pio = { version = "0.2.1", optional = true }
 cortex-m = { version = "0.7.6", optional = true }
 cortex-m-rt = {version = "0.7.1", optional = true }
 embedded-alloc = { version = "0.6.0", optional = true }
 embedded-graphics = { version = "0.8.1", optional = true }
 embedded-graphics-core = { version = "0.4.0", optional = true }
 embedded-hal = {version = "1.0.0", optional = true }
-display-interface-parallel-gpio = { version = "0.7.0", optional = true}
-mipidsi = { version = "0.8.0", optional = true }
+display-interface = {version = "0.5.0", optional = true }
+fugit = {version = "0.3.6", optional = true }
+# display-interface-parallel-gpio = { version = "0.7.0", optional = true}
+# mipidsi = { version = "0.8.0", optional = true }
 defmt = "0.3"
 defmt-rtt = "0.4"
 panic-halt = { version = "0.2.0", optional = true }
@@ -37,17 +44,21 @@ pico = [
     "slint/unsafe-single-threaded",
     "slint/libm",
     "rp-pico",
+    "rp2040-hal",
+    "pio-proc",
+    "pio",
     "cortex-m",
     "cortex-m-rt",
     "embedded-alloc",
     "embedded-hal",
     "embedded-graphics",
     "embedded-graphics-core",
-    "display-interface-parallel-gpio",
-    "mipidsi",
+    "display-interface",
+    # "display-interface-parallel-gpio",
+    # "mipidsi",
     "panic-halt",
     # "panic-probe",
-    # "fugit",
+    "fugit",
     # "shared-bus",
 ]
 

@@ -25,23 +25,32 @@ fn main() -> Result<(), slint::PlatformError> {
 #[rp_pico::entry]
 fn main() -> ! {
     // Pull in any important traits
+    // use bsp::entry;
     use defmt::*;
     use defmt_rtt as _;
-    use panic_halt as _;
-    use rp_pico as bsp;
-    use bsp::hal::{
-        clocks::{init_clocks_and_plls, Clock},
-        gpio, pac,
+    use fugit::RateExtU32;
+    // use cortex_m::singleton;
+    use hal::{
+        clocks::{ClocksManager, InitError},
+        // dma::{double_buffer, single_buffer, DMAExt},
+        gpio::{FunctionPio0, Pin},
+        pac,
+        pac::vreg_and_chip_reset::vreg::VSEL_A,
+        pio::{Buffers, PIOExt, ShiftDirection},
+        pll::{common_configs::PLL_USB_48MHZ, setup_pll_blocking},
         sio::Sio,
-        watchdog::Watchdog,
+        vreg::set_voltage,
+        // watchdog::Watchdog,
+        xosc::setup_xosc_blocking,
+        Clock,
         Timer,
     };
-    // use slint::platform::WindowEvent;
-    // use embedded_graphics::pixelcolor::Rgb565;
-    use display_interface_parallel_gpio::{Generic16BitBus, PGPIO16BitInterface};
-    use mipidsi::{models::ILI9486Rgb565, options::Orientation, options::Rotation};
-    use mipidsi::options::ColorOrder;
-    use mipidsi::Builder;
+    use panic_halt as _;
+    use rp2040_hal as hal;
+    
+    const XOSC_CRYSTAL_FREQ: u32 = 12_000_000; // Typically found in BSP crates
+    use lib::{overclock, Pio16BitBus, ILI9488};
+    use overclock::PLL_SYS_250MHZ;
 
     // -------- Setup Allocator --------
     const HEAP_SIZE: usize = 200 * 1024;
@@ -54,29 +63,44 @@ fn main() -> ! {
     info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
     let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
+    // let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
 
-    // External high-speed crystal on the pico board is 12Mhz
-    let external_xtal_freq_hz = 12_000_000u32;
-    let clocks = init_clocks_and_plls(
-        external_xtal_freq_hz,
-        pac.XOSC,
-        pac.CLOCKS,
+    set_voltage(&mut pac.VREG_AND_CHIP_RESET, VSEL_A::VOLTAGE1_10);
+
+    let xosc = setup_xosc_blocking(pac.XOSC, XOSC_CRYSTAL_FREQ.Hz())
+        .map_err(InitError::XoscErr)
+        .ok()
+        .unwrap();
+    let mut clocks = ClocksManager::new(pac.CLOCKS);
+
+    let pll_sys = setup_pll_blocking(
         pac.PLL_SYS,
-        pac.PLL_USB,
+        xosc.operating_frequency().into(),
+        PLL_SYS_250MHZ,
+        &mut clocks,
         &mut pac.RESETS,
-        &mut watchdog,
     )
-    .ok()
+    .map_err(InitError::PllError)
+    .unwrap();
+    let pll_usb = setup_pll_blocking(
+        pac.PLL_USB,
+        xosc.operating_frequency().into(),
+        PLL_USB_48MHZ,
+        &mut clocks,
+        &mut pac.RESETS,
+    )
+    .map_err(InitError::PllError)
     .unwrap();
 
-    let mut delay = DelayCompat(cortex_m::delay::Delay::new(
-        core.SYST,
-        clocks.system_clock.freq().to_Hz(),
-    ));
+    clocks
+        .init_default(&xosc, &pll_sys, &pll_usb)
+        .map_err(InitError::ClockError)
+        .unwrap();
 
-    let pins = bsp::Pins::new(
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+
+    let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
@@ -85,55 +109,80 @@ fn main() -> ! {
 
     let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
-    let rst = pins.gpio22.into_push_pull_output_in_state(gpio::PinState::High);
-    let wr = pins.gpio19.into_push_pull_output_in_state(gpio::PinState::High);
+    let program = pio_proc::pio_asm!(
+        ".side_set 1"
+        ".wrap_target",
+        "   out pins, 16    side 0",
+        "   nop             side 1",
+        ".wrap"
+    );
+
+    let wr: Pin<_, FunctionPio0, _> = pins.gpio19.into_function();
+    let wr_pin_id = wr.id().num;
+
     let dc = pins.gpio20.into_push_pull_output();
-    let _blk = pins.gpio28.into_push_pull_output_in_state(gpio::PinState::High);
+    let rst = pins.gpio22.into_push_pull_output();
+    let bl = pins.gpio28.into_push_pull_output();
 
-    let lcd_d0 = pins.gpio0.into_push_pull_output();
-    let lcd_d1 = pins.gpio1.into_push_pull_output();
-    let lcd_d2 = pins.gpio2.into_push_pull_output();
-    let lcd_d3 = pins.gpio3.into_push_pull_output();
-    let lcd_d4 = pins.gpio4.into_push_pull_output();
-    let lcd_d5 = pins.gpio5.into_push_pull_output();
-    let lcd_d6 = pins.gpio6.into_push_pull_output();
-    let lcd_d7 = pins.gpio7.into_push_pull_output();
-    let lcd_d8 = pins.gpio8.into_push_pull_output();
-    let lcd_d9 = pins.gpio9.into_push_pull_output();
-    let lcd_d10 = pins.gpio10.into_push_pull_output();
-    let lcd_d11 = pins.gpio11.into_push_pull_output();
-    let lcd_d12 = pins.gpio12.into_push_pull_output();
-    let lcd_d13 = pins.gpio13.into_push_pull_output();
-    let lcd_d14 = pins.gpio14.into_push_pull_output();
-    let lcd_d15 = pins.gpio15.into_push_pull_output();
+    let lcd_d0: Pin<_, FunctionPio0, _> = pins.gpio0.into_function();
+    let lcd_d1: Pin<_, FunctionPio0, _> = pins.gpio1.into_function();
+    let lcd_d2: Pin<_, FunctionPio0, _> = pins.gpio2.into_function();
+    let lcd_d3: Pin<_, FunctionPio0, _> = pins.gpio3.into_function();
+    let lcd_d4: Pin<_, FunctionPio0, _> = pins.gpio4.into_function();
+    let lcd_d5: Pin<_, FunctionPio0, _> = pins.gpio5.into_function();
+    let lcd_d6: Pin<_, FunctionPio0, _> = pins.gpio6.into_function();
+    let lcd_d7: Pin<_, FunctionPio0, _> = pins.gpio7.into_function();
+    let lcd_d8: Pin<_, FunctionPio0, _> = pins.gpio8.into_function();
+    let lcd_d9: Pin<_, FunctionPio0, _> = pins.gpio9.into_function();
+    let lcd_d10: Pin<_, FunctionPio0, _> = pins.gpio10.into_function();
+    let lcd_d11: Pin<_, FunctionPio0, _> = pins.gpio11.into_function();
+    let lcd_d12: Pin<_, FunctionPio0, _> = pins.gpio12.into_function();
+    let lcd_d13: Pin<_, FunctionPio0, _> = pins.gpio13.into_function();
+    let lcd_d14: Pin<_, FunctionPio0, _> = pins.gpio14.into_function();
+    let lcd_d15: Pin<_, FunctionPio0, _> = pins.gpio15.into_function();
 
-    let bus = Generic16BitBus::new((
-        lcd_d0,
-        lcd_d1,
-        lcd_d2,
-        lcd_d3,
-        lcd_d4,
-        lcd_d5,
-        lcd_d6,
-        lcd_d7,
-        lcd_d8,
-        lcd_d9,
-        lcd_d10,
-        lcd_d11,
-        lcd_d12,
-        lcd_d13,
-        lcd_d14,
-        lcd_d15,
-    ));
+    let lcd_d0_pin_id = lcd_d0.id().num;
 
-    let di = PGPIO16BitInterface::new(bus, dc, wr);
-    let rotation = Orientation::new().rotate(Rotation::Deg270).flip_horizontal();
-    let mut display = Builder::new(ILI9486Rgb565, di)
-        .reset_pin(rst)
-        .color_order(ColorOrder::Bgr)
-        .orientation(rotation)
-        .init(&mut delay)
-        .unwrap();
+    let pindirs = [
+        (wr_pin_id, hal::pio::PinDir::Output),
+        (lcd_d0.id().num, hal::pio::PinDir::Output),
+        (lcd_d1.id().num, hal::pio::PinDir::Output),
+        (lcd_d2.id().num, hal::pio::PinDir::Output),
+        (lcd_d3.id().num, hal::pio::PinDir::Output),
+        (lcd_d4.id().num, hal::pio::PinDir::Output),
+        (lcd_d5.id().num, hal::pio::PinDir::Output),
+        (lcd_d6.id().num, hal::pio::PinDir::Output),
+        (lcd_d7.id().num, hal::pio::PinDir::Output),
+        (lcd_d8.id().num, hal::pio::PinDir::Output),
+        (lcd_d9.id().num, hal::pio::PinDir::Output),
+        (lcd_d10.id().num, hal::pio::PinDir::Output),
+        (lcd_d11.id().num, hal::pio::PinDir::Output),
+        (lcd_d12.id().num, hal::pio::PinDir::Output),
+        (lcd_d13.id().num, hal::pio::PinDir::Output),
+        (lcd_d14.id().num, hal::pio::PinDir::Output),
+        (lcd_d15.id().num, hal::pio::PinDir::Output),
+    ];
+
+    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
+    let installed = pio.install(&program.program).unwrap();
+    let (int, frac) = (1, 0); // as slow as possible (0 is interpreted as 65536)
+    let (mut sm, _, tx) = rp2040_hal::pio::PIOBuilder::from_installed_program(installed)
+        .side_set_pin_base(wr_pin_id)
+        .out_pins(lcd_d0_pin_id, 16)
+        .buffers(Buffers::OnlyTx)
+        .clock_divisor_fixed_point(int, frac)
+        .out_shift_direction(ShiftDirection::Right)
+        .autopull(true)
+        .pull_threshold(16)
+        .build(sm0);
+    sm.set_pindirs(pindirs);
+    sm.start();
+
+    info!("PIO block setuped");
+
+    let di = Pio16BitBus::new(tx, dc);
+    let mut display = ILI9488::new(di, Some(rst), Some(bl), 480, 320);
+    display.init(&mut delay).unwrap();
 
     const HOR_RES: u32 = 480;
     const VER_RES: u32 = 320;
@@ -242,29 +291,7 @@ fn main() -> ! {
         // cortex_m::asm::wfe();
     }
 }
-/// Wrapper around `Delay` to implement the embedded-hal 1.0 delay.
-///
-/// This can be removed when a new version of the `cortex_m` crate is released.
-#[cfg(not(feature = "simulator"))]
-struct DelayCompat(cortex_m::delay::Delay);
 
-#[cfg(not(feature = "simulator"))]
-impl embedded_hal::delay::DelayNs for DelayCompat {
-    fn delay_ns(&mut self, mut ns: u32) {
-        while ns > 1000 {
-            self.0.delay_us(1);
-            ns = ns.saturating_sub(1000);
-        }
-    }
-
-    fn delay_us(&mut self, us: u32) {
-        self.0.delay_us(us);
-    }
-
-    fn delay_ms(&mut self, ms: u32) {
-        self.delay_us(ms * 1000);
-    }
-}
 // TODO: implement ft6236 touch driver support
 #[cfg(not(feature = "simulator"))]
 mod ft6236 {

@@ -28,12 +28,20 @@ classic template at https://github.com/slint-ui/slint-rust-template.
 
    a. Install the cargo extension to create UF2 images for the RP2040 USB Bootloader
       ```
+      sudo apt install cmake libudev-dev -y
       cargo install flip-link
       cargo install --locked probe-rs-tools
       cargo install elf2uf2-rs --locked
       ```
 
-   b. Run on the device
+   b. Setup udev rules
+      ```
+      sudo cp 50-cmsis-dap.rules /etc/udev/rules.d/
+      sudo udevadm control --reload-rules
+      sudo udevadm trigger
+      ```
+
+   c. Run on the device
       ```
       cargo run --target=thumbv6m-none-eabi --features=pico --release
       ```

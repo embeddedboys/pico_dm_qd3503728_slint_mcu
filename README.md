@@ -28,6 +28,8 @@ classic template at https://github.com/slint-ui/slint-rust-template.
 
    a. Install the cargo extension to create UF2 images for the RP2040 USB Bootloader
       ```
+      cargo install flip-link
+      cargo install --locked probe-rs-tools
       cargo install elf2uf2-rs --locked
       ```
 

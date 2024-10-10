@@ -1,4 +1,4 @@
-import { Button, VerticalBox , AboutSlint, Slider } from "std-widgets.slint";
+import { Button, VerticalBox , AboutSlint, Slider, Switch, ListView, CheckBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     width: 480px;
@@ -6,8 +6,18 @@ export component AppWindow inherits Window {
     in-out property <float> slider-value <=> slider.value ;
     callback request-increase-value();
     VerticalBox { 
-        Text {
-            text: "Counter: \{slider.value}";
+        HorizontalLayout {
+            Text {
+                text: "Counter: \{slider.value}";
+                Switch {
+                    text: "Switch"; 
+                }
+                CheckBox {
+                    text: "CheckBox";
+                    x: 360px;
+                    y: -6px;
+                }
+            }
         }
         Button {
             text: "Increase value";

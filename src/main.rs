@@ -187,7 +187,7 @@ fn main() -> ! {
     let mut display = ILI9488::new(di, Some(rst), Some(bl), 480, 320);
     display.init(&mut delay).unwrap();
 
-    let mut i2c = I2C::i2c1(
+    let i2c = I2C::i2c1(
         pac.I2C1,
         pins.gpio26.reconfigure(),
         pins.gpio27.reconfigure(),
@@ -196,9 +196,8 @@ fn main() -> ! {
         clocks.system_clock.freq(),
     );
 
-    let irq_pin = pins.gpio21.into_pull_up_input();
     let rst_pin = pins.gpio18.into_push_pull_output();
-    let mut touch = ft6236::FT6236::new(irq_pin, rst_pin, i2c).unwrap();
+    let mut touch = ft6236::FT6236::new(rst_pin, i2c).unwrap();
     let _ = touch.init(&mut delay);
 
     const HOR_RES: u32 = 480;
@@ -312,35 +311,31 @@ fn main() -> ! {
 #[cfg(not(feature = "simulator"))]
 mod ft6236 {
     use cortex_m::delay::Delay;
-    use defmt::info;
-    use embedded_hal::digital::{InputPin, OutputPin};
+    // use defmt::info;
+    use embedded_hal::digital::OutputPin;
     use embedded_hal::i2c::I2c;
 
     const FT6236_DEF_ADDR: u8 =    0x38;
     const FT6236_REG_TD_STAT: u8 = 0x02;
     const FT6236_REG_TP1_XH: u8 =  0x03;
-    const FT6236_REG_TP1_XL: u8 =  0x04;
+    // const FT6236_REG_TP1_XL: u8 =  0x04;
     const FT6236_REG_TP1_YH: u8 =  0x05;
-    const FT6236_REG_TP1_YL: u8 =  0x06;
+    // const FT6236_REG_TP1_YL: u8 =  0x06;
 
-    pub struct FT6236<IRQ: InputPin, RST: OutputPin, I2C: I2c> {
-        irq: IRQ,
+    pub struct FT6236<RST: OutputPin, I2C: I2c> {
         rst: RST,
         i2c: I2C,
         addr: u8,
-        pressed: bool,
     }
 
-    impl<PinE, IRQ: InputPin<Error = PinE>, RST: OutputPin<Error = PinE>, I2C: I2c>
-        FT6236<IRQ, RST, I2C>
+    impl<PinE, RST: OutputPin<Error = PinE>, I2C: I2c>
+        FT6236<RST, I2C>
     {
-        pub fn new(irq: IRQ, rst: RST, i2c: I2C) -> Result<Self, PinE> {
+        pub fn new(rst: RST, i2c: I2C) -> Result<Self, PinE> {
             Ok(Self {
-                irq,
                 rst,
                 i2c,
                 addr: FT6236_DEF_ADDR,
-                pressed: false,
             })
         }
 
@@ -368,40 +363,41 @@ mod ft6236 {
             Ok(readbuf[0])
         }
 
+        pub fn read_reg_16(&mut self, reg: u8) -> Result<u16, I2C::Error> {
+            let mut readbuf: [u8; 2] = [0; 2];
+            self.i2c.write_read(self.addr, &[reg], &mut readbuf)?;
+            Ok((readbuf[0] as u16) << 8 | (readbuf[1] as u16))
+        }
+
         // pub fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), I2C::Error> {
         //     Ok(())
         // }
 
         pub fn is_pressed(&mut self) -> Result<bool, I2C::Error> {
-            let val = self.read_reg(FT6236_REG_TD_STAT)?;
-            Ok(val == 0x01)
+            Ok(self.read_reg(FT6236_REG_TD_STAT)? > 0)
         }
 
         pub fn read_x(&mut self) -> Result<u16, I2C::Error> {
-            let val_h = self.read_reg(FT6236_REG_TP1_YH)? as u16;
-            let val_l = self.read_reg(FT6236_REG_TP1_YL)? as u16;
-            Ok(val_h << 8 | val_l)
+            Ok(self.read_reg_16(FT6236_REG_TP1_YH)?)
         }
 
         pub fn read_y(&mut self) -> Result<u16, I2C::Error> {
-            let val_h = (self.read_reg(FT6236_REG_TP1_XH)? & 0x1f) as u16;
-            let val_l = self.read_reg(FT6236_REG_TP1_XL)? as u16;
-            Ok(320 - (val_h << 8 | val_l))
+            Ok(320 - (self.read_reg_16(FT6236_REG_TP1_XH)? & 0x1fff))
         }
 
         pub fn read(&mut self) -> Result<Option<(u16, u16)>, Error<PinE, I2C::Error>> {
             match self.is_pressed() {
                 Ok(pressed) => {
-                    if pressed {
+                    if !pressed {
+                        Ok(None)
+                    } else {
                         Ok(Some((
                             self.read_x().unwrap(),
                             self.read_y().unwrap(),
                         )))
-                    } else {
-                        Ok(None)
                     }
                 }
-                Err(e) => {
+                Err(_e) => {
                     Ok(None)
                 }
             }

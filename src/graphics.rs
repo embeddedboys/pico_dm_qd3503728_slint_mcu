@@ -7,8 +7,6 @@ use defmt::info;
 #[cfg(not(feature = "simulator"))]
 use display_interface::{DisplayError, WriteOnlyDataCommand};
 #[cfg(not(feature = "simulator"))]
-use embedded_graphics::prelude::IntoStorage;
-#[cfg(not(feature = "simulator"))]
 use embedded_graphics_core::{
     draw_target::DrawTarget,
     geometry::{Dimensions, OriginDimensions, Size},
@@ -19,7 +17,6 @@ use embedded_graphics_core::{
 #[cfg(not(feature = "simulator"))]
 use embedded_hal::digital::OutputPin;
 
-// type Result<T = ()> = core::result::Result<T, DisplayError>;
 #[cfg(not(feature = "simulator"))]
 impl<DI, RST, BL> DrawTarget for ILI9488<DI, RST, BL>
 where
@@ -34,15 +31,12 @@ where
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
-        info!("draw_iter");
         for pixel in pixels {
             let x = pixel.0.x as u16;
             let y = pixel.0.y as u16;
-            let mut buf = [pixel.1.into_storage()];
-            let slice = buf.as_mut();
 
             self.set_addr_win(x, y, x, y)?;
-            self.write_data16(slice)?
+            self.write_pixels([pixel.1])?;
         }
         Ok(())
     }
@@ -60,8 +54,6 @@ where
         let ys = area.top_left.y as u16;
         let xe = bottom_right.x as u16;
         let ye = bottom_right.y as u16;
-
-        // let count = intersection.size.width * intersection.size.height;
 
         let colors = colors.into_iter();
         if &intersection == area {

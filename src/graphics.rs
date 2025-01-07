@@ -61,7 +61,7 @@ where
             self.set_addr_win(xs, ys, xe, ye)?;
             self.write_pixels(colors)?;
         } else {
-            info!("overlap not supports yet!");
+            info!("overlap not supported yet");
         }
         Ok(())
     }
